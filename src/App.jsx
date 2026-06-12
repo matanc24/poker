@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Minus, Users, Coins, Calculator, Trash2, RotateCcw, ChevronRight, Trophy, X, Check, AlertTriangle, Banknote } from 'lucide-react';
+import { Plus, Minus, Coins, Calculator, RotateCcw, ChevronRight, Trophy, X, Check, AlertTriangle, Banknote } from 'lucide-react';
 
 export default function PokerNight() {
   const [stage, setStage] = useState('home'); // home, setup, game, cashout, settlement
@@ -12,6 +12,9 @@ export default function PokerNight() {
   const [newCashWinnerName, setNewCashWinnerName] = useState('');
   const [newCashWinnerAmount, setNewCashWinnerAmount] = useState('');
   const [confirmDialog, setConfirmDialog] = useState(null); // { title, message, onConfirm }
+  const [addPlayerOpen, setAddPlayerOpen] = useState(false);
+  const [midGameName, setMidGameName] = useState('');
+  const [midGameAmount, setMidGameAmount] = useState('');
   const [loading, setLoading] = useState(true);
 
   // טעינה מ-localStorage
@@ -56,6 +59,23 @@ export default function PokerNight() {
 
   const removePlayer = (id) => {
     setPlayers(players.filter(p => p.id !== id));
+  };
+
+  // הוספת שחקן באמצע המשחק (למשל: שחקן מזומן שעובר לרישומים)
+  const addPlayerMidGame = () => {
+    const name = midGameName.trim();
+    const amount = Number(midGameAmount) || defaultBuyIn;
+    if (!name || amount <= 0) return;
+    if (players.some(p => p.name === name)) return;
+    setPlayers([...players, {
+      id: Date.now(),
+      name,
+      buyIns: [amount],
+      chips: null,
+    }]);
+    setMidGameName('');
+    setMidGameAmount('');
+    setAddPlayerOpen(false);
   };
 
   const addBuyIn = (playerId, amount) => {
@@ -149,7 +169,7 @@ export default function PokerNight() {
   // אלגוריתם debt simplification
   const calculateTransfers = () => {
     if (players.some(p => p.chips === null)) return null;
-    
+
     // נטו לכל שחקן רשום: chips - total buy-ins
     const balances = players.map(p => ({
       name: p.name,
@@ -169,7 +189,7 @@ export default function PokerNight() {
 
     const transfers = [];
     let i = 0, j = 0;
-    
+
     while (i < debtors.length && j < creditors.length) {
       const debt = -debtors[i].balance;
       const credit = creditors[j].balance;
@@ -191,7 +211,6 @@ export default function PokerNight() {
     return transfers;
   };
 
-  const chipDiff = totalChips - totalPot;
   const transfers = stage === 'settlement' ? calculateTransfers() : null;
 
   if (loading) {
@@ -204,7 +223,7 @@ export default function PokerNight() {
       fontFamily: '"Frank Ruhl Libre", "Playfair Display", Georgia, serif',
     }}>
       <link href="https://fonts.googleapis.com/css2?family=Frank+Ruhl+Libre:wght@400;500;700;900&family=Heebo:wght@300;400;600;800&display=swap" rel="stylesheet" />
-      
+
       {/* Header */}
       <div className="border-b border-amber-900/30 backdrop-blur-sm sticky top-0 z-10 bg-stone-950/80">
         <div className="max-w-3xl mx-auto px-4 py-4 flex items-center justify-between">
@@ -224,7 +243,7 @@ export default function PokerNight() {
       </div>
 
       <div className="max-w-3xl mx-auto px-4 py-8" style={{fontFamily: '"Heebo", sans-serif'}}>
-        
+
         {/* Stage: Home */}
         {stage === 'home' && (
           <div className="text-center py-16">
@@ -331,6 +350,59 @@ export default function PokerNight() {
                   ₪{totalPot.toLocaleString()}
                 </div>
               </div>
+            </div>
+
+            {/* הוספת שחקן באמצע המשחק */}
+            <div className="mb-6">
+              {!addPlayerOpen ? (
+                <button
+                  onClick={() => setAddPlayerOpen(true)}
+                  className="w-full border border-dashed border-stone-700 hover:border-amber-700 text-stone-500 hover:text-amber-300 py-3 rounded-sm transition flex items-center justify-center gap-2 text-sm"
+                >
+                  <Plus size={16} />
+                  הוסף שחקן (למשל: שחקן מזומן שעובר לרישומים)
+                </button>
+              ) : (
+                <div className="bg-stone-900/50 border border-amber-900/30 rounded-sm p-4">
+                  <div className="text-sm text-amber-200 mb-3 font-semibold">שחקן חדש מצטרף לרישומים</div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={midGameName}
+                      onChange={(e) => setMidGameName(e.target.value)}
+                      placeholder="שם"
+                      autoFocus
+                      className="flex-1 bg-stone-950 border border-stone-700 rounded-sm px-3 py-2 text-amber-100 focus:border-amber-600 focus:outline-none"
+                    />
+                    <input
+                      type="number"
+                      value={midGameAmount}
+                      onChange={(e) => setMidGameAmount(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && addPlayerMidGame()}
+                      placeholder={`רישום ראשון (${defaultBuyIn})`}
+                      className="w-40 bg-stone-950 border border-stone-700 rounded-sm px-3 py-2 text-amber-100 focus:border-amber-600 focus:outline-none"
+                    />
+                  </div>
+                  <div className="text-xs text-stone-500 mt-2 leading-relaxed">
+                    שים לב: מזומן שהשחקן שם קודם נשאר בקופה ולא נרשם באפליקציה. רק הרישומים מעכשיו נספרים.
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      onClick={() => { setAddPlayerOpen(false); setMidGameName(''); setMidGameAmount(''); }}
+                      className="px-4 py-2 rounded-sm border border-stone-700 text-stone-400 hover:text-amber-100 transition text-sm"
+                    >
+                      ביטול
+                    </button>
+                    <button
+                      onClick={addPlayerMidGame}
+                      disabled={!midGameName.trim()}
+                      className="flex-1 bg-amber-700 hover:bg-amber-600 disabled:bg-stone-800 disabled:text-stone-600 text-amber-50 py-2 rounded-sm transition text-sm font-semibold"
+                    >
+                      הוסף שחקן
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-3 mb-8">
