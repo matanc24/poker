@@ -1,10 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Minus, Coins, Calculator, RotateCcw, ChevronRight, Trophy, X, Check, AlertTriangle, Banknote } from 'lucide-react';
+import { Plus, Minus, Coins, Calculator, RotateCcw, ChevronRight, Trophy, X, Check, AlertTriangle, Banknote, Briefcase } from 'lucide-react';
+
+const TOLERANCE = 10; // סטייה מותרת בשקלים בעת פיצול
 
 export default function PokerNight() {
   const [stage, setStage] = useState('home'); // home, setup, game, cashout, settlement
   const [players, setPlayers] = useState([]);
-  const [cashWinners, setCashWinners] = useState([]); // שחקני מזומן שצריך לשלם להם
+  const [cashWinners, setCashWinners] = useState([]); // שחקני מזומן שצריך לשלם להם (overflow)
+  const [briefcaseCash, setBriefcaseCash] = useState(''); // סך המזומן ששחקני מזומן הכניסו (בלי הקופה הרשומה)
   const [newPlayerName, setNewPlayerName] = useState('');
   const [defaultBuyIn, setDefaultBuyIn] = useState(50);
   const [customBuyInOpen, setCustomBuyInOpen] = useState(null); // playerId
@@ -27,6 +30,7 @@ export default function PokerNight() {
         setPlayers(data.players || []);
         setDefaultBuyIn(data.defaultBuyIn || 50);
         setCashWinners(data.cashWinners || []);
+        setBriefcaseCash(data.briefcaseCash ?? '');
       }
     } catch (e) {
       // אין משחק שמור
@@ -39,10 +43,10 @@ export default function PokerNight() {
     if (loading) return;
     try {
       localStorage.setItem('poker_current_game', JSON.stringify({
-        stage, players, defaultBuyIn, cashWinners
+        stage, players, defaultBuyIn, cashWinners, briefcaseCash
       }));
     } catch (e) {}
-  }, [stage, players, defaultBuyIn, cashWinners, loading]);
+  }, [stage, players, defaultBuyIn, cashWinners, briefcaseCash, loading]);
 
   const addPlayer = () => {
     const name = newPlayerName.trim();
@@ -97,26 +101,26 @@ export default function PokerNight() {
     ));
   };
 
-  // שחקן יצא באמצע והחזיר בז'יטונים את הסכום שרשם - יוצא ב-0
-  const settlePlayer = (playerId) => {
+  // שחקן יצא באמצע - מסמן אותו כ"יצא", אבל אפשר עדיין לערוך את הסכום הסופי שלו
+  const markLeftEarly = (playerId) => {
     const player = players.find(p => p.id === playerId);
     if (!player) return;
     const totalBuyIn = player.buyIns.reduce((a, b) => a + b, 0);
     setConfirmDialog({
-      title: `סגירה ב-0 - ${player.name}`,
-      message: `האם ${player.name} יצא באמצע והחזיר ז'יטונים בערך ₪${totalBuyIn.toLocaleString()}?\nהמאזן שלו יוגדר כ-0.`,
+      title: `${player.name} יצא מהמשחק`,
+      message: `לסמן ש-${player.name} יצא?\nכברירת מחדל המאזן שלו יהיה 0 (החזיר ז'יטונים בערך ₪${totalBuyIn.toLocaleString()}), אבל תוכל לערוך את הסכום הסופי שלו במסך הספירה.`,
       onConfirm: () => {
         setPlayers(prev => prev.map(p =>
-          p.id === playerId ? { ...p, chips: totalBuyIn, settled: true } : p
+          p.id === playerId ? { ...p, chips: totalBuyIn, leftEarly: true } : p
         ));
         setConfirmDialog(null);
       }
     });
   };
 
-  const unsettlePlayer = (playerId) => {
+  const unmarkLeftEarly = (playerId) => {
     setPlayers(players.map(p =>
-      p.id === playerId ? { ...p, chips: null, settled: false } : p
+      p.id === playerId ? { ...p, chips: null, leftEarly: false } : p
     ));
   };
 
@@ -147,6 +151,7 @@ export default function PokerNight() {
         setStage('home');
         setPlayers([]);
         setCashWinners([]);
+        setBriefcaseCash('');
         try {
           localStorage.removeItem('poker_current_game');
         } catch (e) {}
@@ -161,27 +166,45 @@ export default function PokerNight() {
     ));
   };
 
-  // חישוב סך כל הקופה
+  // חישובים
   const totalPot = players.reduce((sum, p) => sum + p.buyIns.reduce((a, b) => a + b, 0), 0);
   const totalChips = players.reduce((sum, p) => sum + (p.chips || 0), 0);
   const totalCashOwed = cashWinners.reduce((sum, c) => sum + c.amount, 0);
+  const briefcaseCashNum = Number(briefcaseCash) || 0;
+
+  // ההפרש בין סך הז'יטונים של הרשומים לבין הצפוי.
+  // החוב לשחקני המזומן מכוסה חלקית ע"י המזומן שהם הכניסו;
+  // רק העודף שמעבר למזומן שלהם (החלק שמגיע מהרשומים) מקטין את הז'יטונים הצפויים.
+  const cashOverflow = Math.max(0, totalCashOwed - briefcaseCashNum);
+  const expectedChips = totalPot - cashOverflow;
+  const chipGap = totalChips - expectedChips; // חיובי = עודף, שלילי = חוסר
+  const allChipsEntered = players.length > 0 && players.every(p => p.chips !== null);
+  const withinTolerance = Math.abs(chipGap) <= TOLERANCE;
+  const canSettle = allChipsEntered && withinTolerance;
 
   // אלגוריתם debt simplification
   const calculateTransfers = () => {
     if (players.some(p => p.chips === null)) return null;
 
-    // נטו לכל שחקן רשום: chips - total buy-ins
     const balances = players.map(p => ({
       name: p.name,
       balance: p.chips - p.buyIns.reduce((a, b) => a + b, 0)
     }));
 
-    // שחקני מזומן זוכים: מאזן חיובי (מגיע להם)
-    cashWinners.forEach(c => {
-      balances.push({ name: c.name, balance: c.amount, isCash: true });
+    // שחקני המזומן: המזומן שהכניסו (pool כולל) מקזז את מה שמגיע להם.
+    // רק העודף שמעבר למזומן שלהם צריך להגיע מהשחקנים הרשומים.
+    // מקזזים את ה-pool מהזוכים הגדולים ביותר קודם.
+    let cashPool = briefcaseCashNum;
+    const sortedCashWinners = [...cashWinners].sort((a, b) => b.amount - a.amount);
+    sortedCashWinners.forEach(c => {
+      const covered = Math.min(cashPool, c.amount);
+      cashPool -= covered;
+      const overflow = c.amount - covered;
+      if (overflow > 0.01) {
+        balances.push({ name: c.name, balance: overflow, isCash: true });
+      }
     });
 
-    // עיגול ל-2 ספרות אחרי הנקודה
     balances.forEach(b => b.balance = Math.round(b.balance * 100) / 100);
 
     const creditors = balances.filter(b => b.balance > 0.01).sort((a, b) => b.balance - a.balance);
@@ -408,27 +431,27 @@ export default function PokerNight() {
             <div className="space-y-3 mb-8">
               {players.map((p) => {
                 const total = p.buyIns.reduce((a, b) => a + b, 0);
-                const isSettled = p.settled;
+                const isLeft = p.leftEarly;
                 const isCustomOpen = customBuyInOpen === p.id;
                 return (
-                  <div key={p.id} className={`bg-stone-900/50 border rounded-sm p-4 transition ${isSettled ? 'border-stone-800 opacity-60' : 'border-amber-900/30 hover:border-amber-800/50'}`}>
+                  <div key={p.id} className={`bg-stone-900/50 border rounded-sm p-4 transition ${isLeft ? 'border-stone-800 opacity-60' : 'border-amber-900/30 hover:border-amber-800/50'}`}>
                     <div className="flex items-center justify-between">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-baseline gap-3 flex-wrap">
                           <span className="text-lg text-amber-100 font-semibold">{p.name}</span>
-                          {isSettled ? (
-                            <span className="text-xs text-stone-500 border border-stone-700 px-2 py-0.5 rounded-sm">יצא ב-0</span>
+                          {isLeft ? (
+                            <span className="text-xs text-stone-500 border border-stone-700 px-2 py-0.5 rounded-sm">יצא מהמשחק</span>
                           ) : (
                             <span className="text-stone-500 text-sm">
                               {p.buyIns.length} buy-in{p.buyIns.length > 1 ? 's' : ''}
                             </span>
                           )}
                         </div>
-                        <div className={`text-2xl font-bold mt-1 ${isSettled ? 'text-stone-500' : 'text-amber-400'}`} style={{fontFamily: '"Frank Ruhl Libre", serif'}}>
+                        <div className={`text-2xl font-bold mt-1 ${isLeft ? 'text-stone-500' : 'text-amber-400'}`} style={{fontFamily: '"Frank Ruhl Libre", serif'}}>
                           ₪{total.toLocaleString()}
                         </div>
                       </div>
-                      {!isSettled && (
+                      {!isLeft && (
                         <div className="flex items-center gap-2 flex-shrink-0">
                           {p.buyIns.length > 1 && (
                             <button
@@ -458,18 +481,18 @@ export default function PokerNight() {
                           </button>
                         </div>
                       )}
-                      {isSettled && (
+                      {isLeft && (
                         <button
-                          onClick={() => unsettlePlayer(p.id)}
+                          onClick={() => unmarkLeftEarly(p.id)}
                           className="text-stone-500 hover:text-amber-300 text-xs underline"
                         >
-                          בטל איפוס
+                          בטל יציאה
                         </button>
                       )}
                     </div>
 
                     {/* שורת סכום ידני */}
-                    {isCustomOpen && !isSettled && (
+                    {isCustomOpen && !isLeft && (
                       <div className="mt-3 pt-3 border-t border-stone-800 flex gap-2">
                         <input
                           type="number"
@@ -500,16 +523,16 @@ export default function PokerNight() {
                       </div>
                     )}
 
-                    {/* כפתור איפוס - יציאה באמצע */}
-                    {!isSettled && (
+                    {/* כפתור יציאה מהמשחק */}
+                    {!isLeft && (
                       <div className="mt-3 pt-3 border-t border-stone-800/50 flex justify-end">
                         <button
-                          onClick={() => settlePlayer(p.id)}
+                          onClick={() => markLeftEarly(p.id)}
                           className="text-xs text-stone-500 hover:text-amber-300 transition flex items-center gap-1"
-                          title="יצא באמצע והחזיר את הז'יטונים"
+                          title="השחקן יצא מהמשחק (אפשר לערוך את הסכום הסופי בספירה)"
                         >
                           <RotateCcw size={12} />
-                          סגירה ב-0 (יוצא באמצע)
+                          יצא מהמשחק
                         </button>
                       </div>
                     )}
@@ -538,6 +561,37 @@ export default function PokerNight() {
               הזן את הערך הכספי של הז'יטונים שיש לכל שחקן בסוף המשחק
             </p>
 
+            {/* מזומן של שחקני מזומן */}
+            <div className="bg-stone-900/30 border border-amber-900/20 rounded-sm p-4 mb-6">
+              <div className="flex items-center gap-2 mb-2">
+                <Briefcase size={18} className="text-amber-400" />
+                <h3 className="text-amber-200 font-semibold">מזומן שהוכנס למזוודה</h3>
+              </div>
+              <p className="text-stone-500 text-xs mb-3 leading-relaxed">
+                סך המזומן ששחקני המזומן הכניסו למזוודה (בלי הקופה הרשומה). עוזר לאמת שהספירה נכונה.
+              </p>
+              <input
+                type="number"
+                value={briefcaseCash}
+                onChange={(e) => setBriefcaseCash(e.target.value)}
+                placeholder="מזומן שהוכנס ע&quot;י שחקני מזומן"
+                className="w-full bg-stone-950 border border-stone-700 rounded-sm px-4 py-2.5 text-amber-100 focus:border-amber-600 focus:outline-none"
+              />
+              {briefcaseCashNum > 0 && (
+                <div className="mt-3 pt-3 border-t border-stone-800 text-xs leading-relaxed">
+                  {briefcaseCashNum < totalCashOwed ? (
+                    <div className="text-red-400">
+                      ⚠ שחקני המזומן הכניסו ₪{briefcaseCashNum.toLocaleString()} אבל צריך לשלם להם ₪{totalCashOwed.toLocaleString()}. ההפרש (₪{(totalCashOwed - briefcaseCashNum).toLocaleString()}) מגיע מהשחקנים הרשומים שהפסידו.
+                    </div>
+                  ) : (
+                    <div className="text-stone-400">
+                      מתוך ה-₪{briefcaseCashNum.toLocaleString()} שהוכנסו, צריך להחזיר לשחקני המזומן ₪{totalCashOwed.toLocaleString()} - כלומר ₪{(briefcaseCashNum - totalCashOwed).toLocaleString()} מהמזומן שלהם נשארו לשחקנים הרשומים.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div className="bg-stone-900/50 border border-amber-900/30 rounded-sm p-4 mb-6">
               <div className="grid grid-cols-3 gap-3 text-sm">
                 <div>
@@ -550,32 +604,34 @@ export default function PokerNight() {
                 </div>
                 <div>
                   <div className="text-stone-500 uppercase tracking-widest text-xs">סך ז'יטונים</div>
-                  <div className={`text-xl font-bold ${Math.abs(totalChips - (totalPot - totalCashOwed)) < 0.01 ? 'text-emerald-400' : 'text-red-400'}`} style={{fontFamily: '"Frank Ruhl Libre", serif'}}>
+                  <div className={`text-xl font-bold ${allChipsEntered && withinTolerance ? 'text-emerald-400' : 'text-red-400'}`} style={{fontFamily: '"Frank Ruhl Libre", serif'}}>
                     ₪{totalChips.toLocaleString()}
                   </div>
                 </div>
               </div>
-              {(() => {
-                const expectedChips = totalPot - totalCashOwed;
-                const diff = totalChips - expectedChips;
-                if (Math.abs(diff) >= 0.01 && players.every(p => p.chips !== null)) {
-                  return (
-                    <div className="mt-3 pt-3 border-t border-stone-800 text-sm">
+              {allChipsEntered && Math.abs(chipGap) >= 0.01 && (
+                <div className="mt-3 pt-3 border-t border-stone-800 text-sm">
+                  {withinTolerance ? (
+                    <div className="text-amber-300/90 text-xs leading-relaxed">
+                      פער קטן של ₪{Math.abs(chipGap).toLocaleString()} (בתוך הטווח המותר). אפשר לפצל - תחליטו ביניכם מה לעשות עם העודף/החוסר.
+                    </div>
+                  ) : (
+                    <>
                       <div className="text-red-400 font-semibold mb-1">
-                        ⚠ הפרש של ₪{Math.abs(diff).toLocaleString()}
+                        ⚠ הפרש של ₪{Math.abs(chipGap).toLocaleString()}
                       </div>
                       <div className="text-xs text-stone-400 leading-relaxed">
-                        {diff < 0 ? (
+                        {chipGap < 0 ? (
                           <>
-                            סך הז'יטונים נמוך ב-₪{Math.abs(diff).toLocaleString()} ממה שצפוי. ייתכן ש:
+                            סך הז'יטונים נמוך ממה שצפוי. ייתכן ש:
                             <ul className="mt-1 mr-3 space-y-0.5 text-stone-500">
-                              <li>• יש עוד שחקן מזומן זוכה של ₪{Math.abs(diff).toLocaleString()} שלא הוספת</li>
+                              <li>• יש עוד שחקן מזומן זוכה שלא הוספת</li>
                               <li>• אחד השחקנים סופר ז'יטונים לא נכון</li>
                             </ul>
                           </>
                         ) : (
                           <>
-                            סך הז'יטונים גבוה ב-₪{Math.abs(diff).toLocaleString()} ממה שצפוי. ייתכן ש:
+                            סך הז'יטונים גבוה ממה שצפוי. ייתכן ש:
                             <ul className="mt-1 mr-3 space-y-0.5 text-stone-500">
                               <li>• אחד השחקנים סופר ז'יטונים יותר מדי</li>
                               <li>• רשמת חוב למזומן גדול מדי</li>
@@ -584,26 +640,25 @@ export default function PokerNight() {
                         )}
                       </div>
                       <div className="text-xs text-stone-600 mt-2">צפוי: ₪{expectedChips.toLocaleString()} (קופה פחות חוב למזומן)</div>
-                    </div>
-                  );
-                }
-                return null;
-              })()}
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="space-y-3 mb-6">
               {players.map((p) => {
                 const totalBuyIn = p.buyIns.reduce((a, b) => a + b, 0);
                 const profit = p.chips !== null ? p.chips - totalBuyIn : null;
-                const isSettled = p.settled;
+                const isLeft = p.leftEarly;
                 return (
-                  <div key={p.id} className={`bg-stone-900/50 border rounded-sm p-4 ${isSettled ? 'border-stone-800 opacity-70' : 'border-amber-900/30'}`}>
+                  <div key={p.id} className={`bg-stone-900/50 border rounded-sm p-4 ${isLeft ? 'border-stone-800/70' : 'border-amber-900/30'}`}>
                     <div className="flex items-center justify-between mb-3">
                       <div>
                         <div className="flex items-baseline gap-2">
                           <span className="text-lg text-amber-100 font-semibold">{p.name}</span>
-                          {isSettled && (
-                            <span className="text-xs text-stone-500 border border-stone-700 px-2 py-0.5 rounded-sm">יצא ב-0</span>
+                          {isLeft && (
+                            <span className="text-xs text-stone-500 border border-stone-700 px-2 py-0.5 rounded-sm">יצא מהמשחק</span>
                           )}
                         </div>
                         <div className="text-xs text-stone-500">השקיע: ₪{totalBuyIn.toLocaleString()}</div>
@@ -614,14 +669,17 @@ export default function PokerNight() {
                         </div>
                       )}
                     </div>
-                    {!isSettled && (
-                      <input
-                        type="number"
-                        value={p.chips ?? ''}
-                        onChange={(e) => setChips(p.id, e.target.value)}
-                        placeholder="ערך הז'יטונים בסוף המשחק"
-                        className="w-full bg-stone-950 border border-stone-700 rounded-sm px-4 py-3 text-amber-100 text-lg focus:border-amber-600 focus:outline-none"
-                      />
+                    <input
+                      type="number"
+                      value={p.chips ?? ''}
+                      onChange={(e) => setChips(p.id, e.target.value)}
+                      placeholder={isLeft ? "כמה הוא יצא איתו בסוף (ברירת מחדל: מה שהשקיע)" : "ערך הז'יטונים בסוף המשחק"}
+                      className="w-full bg-stone-950 border border-stone-700 rounded-sm px-4 py-3 text-amber-100 text-lg focus:border-amber-600 focus:outline-none"
+                    />
+                    {isLeft && (
+                      <div className="text-xs text-stone-500 mt-2">
+                        שחקן שיצא באמצע - אפשר לתקן את הסכום הסופי אם הוא לא יצא בדיוק עם מה שהשקיע.
+                      </div>
                     )}
                   </div>
                 );
@@ -692,10 +750,10 @@ export default function PokerNight() {
               </button>
               <button
                 onClick={() => setStage('settlement')}
-                disabled={players.some(p => p.chips === null) || Math.abs(totalChips - (totalPot - totalCashOwed)) >= 0.01}
+                disabled={!canSettle}
                 className="flex-1 bg-gradient-to-b from-amber-700 to-amber-800 hover:from-amber-600 hover:to-amber-700 disabled:from-stone-800 disabled:to-stone-900 disabled:text-stone-600 text-amber-50 py-4 rounded-sm font-semibold tracking-wide shadow-lg shadow-amber-900/50 border border-amber-600/30 disabled:border-stone-700 transition flex items-center justify-center gap-2"
               >
-                {players.some(p => p.chips === null) ? 'מלא את כל השחקנים' : Math.abs(totalChips - (totalPot - totalCashOwed)) >= 0.01 ? 'תקן את ההפרש' : (
+                {!allChipsEntered ? 'מלא את כל השחקנים' : !withinTolerance ? 'תקן את ההפרש' : (
                   <>
                     <Calculator size={18} />
                     חשב העברות
@@ -713,6 +771,12 @@ export default function PokerNight() {
               סיכום הערב
             </h2>
             <p className="text-stone-400 mb-8 text-sm">חישוב אופטימלי של ההעברות</p>
+
+            {Math.abs(chipGap) >= 0.01 && (
+              <div className="bg-amber-950/30 border border-amber-800/40 rounded-sm p-4 mb-6 text-sm text-amber-200/90 leading-relaxed">
+                שימו לב: יש פער קטן של ₪{Math.abs(chipGap).toLocaleString()} בספירה. ההעברות מחושבות לפי הסכומים שהוזנו - ייתכן הפרש קטן שתצטרכו לסגור ביניכם.
+              </div>
+            )}
 
             {/* Player results */}
             <div className="bg-stone-900/50 border border-amber-900/30 rounded-sm p-5 mb-6">
